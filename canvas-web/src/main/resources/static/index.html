@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canvas</title>
+  <!--
+    Deliberately dependency free: no CDN, no build step, no framework. The browser front end is
+    here to show that the same domain core serves a second interface, and a 40kB framework would
+    add nothing to that point while adding a build to something that currently has none.
+
+    The canvas is drawn as one element per cell rather than as a <pre> of the server's rendered
+    text. The text would have been fewer lines, but a grid of cells can be clicked - and clicking
+    the spot you want to fill is the one thing a browser can offer that a terminal cannot.
+  -->
+  <style>
+    :root { color-scheme: light dark; --line: #8883; --cell: 1.05rem; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      max-width: 52rem; margin: 0 auto; padding: 2rem 1rem; line-height: 1.5;
+    }
+    h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+    .sub { opacity: .7; font-size: .9rem; margin: 0 0 2rem; }
+    fieldset { border: 1px solid var(--line); border-radius: .5rem; padding: 1rem; margin: 0 0 1rem; }
+    legend { padding: 0 .4rem; font-weight: 600; font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; }
+    label { display: block; font-size: .85rem; margin-bottom: .25rem; opacity: .8; }
+    input {
+      font: inherit; padding: .45rem .6rem; border: 1px solid var(--line);
+      border-radius: .35rem; background: transparent; color: inherit; width: 100%;
+    }
+    button {
+      font: inherit; padding: .45rem .9rem; border: 1px solid var(--line);
+      border-radius: .35rem; background: transparent; color: inherit; cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: currentColor; }
+    button:disabled { opacity: .4; cursor: not-allowed; }
+    .row { display: flex; gap: .5rem; align-items: end; flex-wrap: wrap; }
+    .row > * { flex: 1 1 5rem; }
+    .row > button { flex: 0 0 auto; }
+    .row > .wide { flex: 2 1 10rem; }
+
+    /* The picture. One grid cell per canvas cell, monospaced so it lines up with the terminal. */
+    #picture {
+      display: grid; gap: 0; width: max-content; max-width: 100%; overflow-x: auto;
+      border: 1px solid currentColor; border-radius: .25rem; padding: .35rem;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      line-height: 1; user-select: none;
+    }
+    #picture .cell {
+      width: var(--cell); height: var(--cell); display: grid; place-items: center;
+      font-size: calc(var(--cell) * .82); cursor: crosshair;
+    }
+    #picture .cell:hover { outline: 1px solid currentColor; outline-offset: -1px; }
+    .empty { opacity: .55; font-size: .9rem; margin: 0; }
+    .hint { font-size: .8rem; opacity: .65; margin: .6rem 0 0; }
+    #log {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .82rem;
+      white-space: pre-wrap; border: 1px solid var(--line); border-radius: .5rem;
+      padding: .85rem; min-height: 7rem; max-height: 18rem; overflow-y: auto; margin: 0;
+    }
+    .err { color: #c0392b; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+
+<h1>Canvas</h1>
+<p class="sub">
+  The same domain core the command line uses, behind a REST API.
+  One shared canvas &mdash; open a second window and it draws there too.
+  State lives in memory only, so restarting the server empties it.
+</p>
+
+<fieldset>
+  <legend>Canvas</legend>
+  <div class="row">
+    <div>
+      <label for="width">Width</label>
+      <input id="width" type="number" min="1" max="1000" value="20">
+    </div>
+    <div>
+      <label for="height">Height</label>
+      <input id="height" type="number" min="1" max="1000" value="4">
+    </div>
+    <button id="create-btn">Create</button>
+    <button id="sample-btn">Draw the example</button>
+    <button id="clear-btn">Discard</button>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>Picture</legend>
+  <p class="empty" id="empty">No canvas yet. Create one above.</p>
+  <div id="picture" class="hidden"></div>
+  <p class="hint" id="hint"></p>
+</fieldset>
+
+<div id="tools" class="hidden">
+  <fieldset>
+    <legend>Line and rectangle</legend>
+    <div class="row">
+      <div><label for="x1">x1</label><input id="x1" type="number" min="1" value="1"></div>
+      <div><label for="y1">y1</label><input id="y1" type="number" min="1" value="1"></div>
+      <div><label for="x2">x2</label><input id="x2" type="number" min="1" value="1"></div>
+      <div><label for="y2">y2</label><input id="y2" type="number" min="1" value="1"></div>
+      <button id="line-btn">Line</button>
+      <button id="rect-btn">Rectangle</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Bucket fill</legend>
+    <div class="row">
+      <div><label for="fx">x</label><input id="fx" type="number" min="1" value="1"></div>
+      <div><label for="fy">y</label><input id="fy" type="number" min="1" value="1"></div>
+      <div><label for="colour">Colour</label><input id="colour" maxlength="1" value="o"></div>
+      <button id="fill-btn">Fill</button>
+    </div>
+  </fieldset>
+</div>
+
+<fieldset>
+  <legend>Session log</legend>
+  <pre id="log"></pre>
+</fieldset>
+
+<script>
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const log = $('log');
+
+  // Where the next click lands: the fill coordinates, or one of the two corners of a line or
+  // rectangle. Clicking a cell fills whichever boxes the user is currently working in.
+  let clickTarget = 'fill';
+
+  function say(text, isError) {
+    const line = document.createElement('div');
+    line.textContent = text;
+    if (isError) {
+      line.className = 'err';
+    }
+    log.appendChild(line);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  /**
+   * Every call goes through here, so error handling is written once.
+   *
+   * The server answers failures with an RFC 9457 ProblemDetail whose `detail` is the domain's own
+   * message - the same sentence the terminal prints. Showing it verbatim means the two interfaces
+   * cannot drift apart in what they tell the user.
+   */
+  async function call(method, path, body) {
+    const response = await fetch(path, {
+      method,
+      headers: body ? {'Content-Type': 'application/json'} : {},
+      body: body ? JSON.stringify(body) : undefined
+    });
+
+    if (response.status === 204) {
+      return null;
+    }
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error((payload && payload.detail) || response.statusText);
+    }
+    return payload;
+  }
+
+  function render(canvas) {
+    const picture = $('picture');
+    picture.innerHTML = '';
+
+    if (!canvas) {
+      picture.classList.add('hidden');
+      $('tools').classList.add('hidden');
+      $('empty').classList.remove('hidden');
+      $('hint').textContent = '';
+      return;
+    }
+
+    picture.style.gridTemplateColumns = `repeat(${canvas.width}, var(--cell))`;
+    canvas.rows.forEach((row, rowIndex) => {
+      // Array.from over the string, not split(''), so a multi-byte fill character stays intact.
+      Array.from(row).forEach((character, columnIndex) => {
+        const x = columnIndex + 1;
+        const y = rowIndex + 1;
+        const cell = document.createElement('div');
+        cell.className = 'cell';
+        cell.textContent = character === ' ' ? ' ' : character;
+        cell.title = `(${x},${y})`;
+        cell.addEventListener('click', () => useCoordinate(x, y));
+        picture.appendChild(cell);
+      });
+    });
+
+    picture.classList.remove('hidden');
+    $('tools').classList.remove('hidden');
+    $('empty').classList.add('hidden');
+    $('hint').textContent =
+        `${canvas.width} x ${canvas.height}. Click a cell to put its coordinates in the `
+        + (clickTarget === 'fill' ? 'fill boxes.' : 'boxes you last touched.');
+  }
+
+  /** Coordinates start at 1 in the top left, exactly as the commands do. */
+  function useCoordinate(x, y) {
+    if (clickTarget === 'from') {
+      $('x1').value = x;
+      $('y1').value = y;
+      clickTarget = 'to';            // a second click completes the shape
+    } else if (clickTarget === 'to') {
+      $('x2').value = x;
+      $('y2').value = y;
+      clickTarget = 'from';
+    } else {
+      $('fx').value = x;
+      $('fy').value = y;
+    }
+  }
+
+  function number(id) {
+    return Number($(id).value);
+  }
+
+  async function run(description, method, path, body) {
+    try {
+      const canvas = await call(method, path, body);
+      render(canvas);
+      say(description);
+    } catch (error) {
+      say(`Error: ${error.message}`, true);
+    }
+  }
+
+  $('create-btn').addEventListener('click', () =>
+      run(`C ${number('width')} ${number('height')}`, 'POST', '/api/canvas',
+          {width: number('width'), height: number('height')}));
+
+  $('line-btn').addEventListener('click', () =>
+      run(`L ${number('x1')} ${number('y1')} ${number('x2')} ${number('y2')}`,
+          'POST', '/api/canvas/lines',
+          {x1: number('x1'), y1: number('y1'), x2: number('x2'), y2: number('y2')}));
+
+  $('rect-btn').addEventListener('click', () =>
+      run(`R ${number('x1')} ${number('y1')} ${number('x2')} ${number('y2')}`,
+          'POST', '/api/canvas/rectangles',
+          {x1: number('x1'), y1: number('y1'), x2: number('x2'), y2: number('y2')}));
+
+  $('fill-btn').addEventListener('click', () =>
+      run(`B ${number('fx')} ${number('fy')} ${$('colour').value}`,
+          'POST', '/api/canvas/fills',
+          {x: number('fx'), y: number('fy'), colour: $('colour').value}));
+
+  $('clear-btn').addEventListener('click', async () => {
+    await call('DELETE', '/api/canvas');
+    render(null);
+    say('Canvas discarded.');
+  });
+
+  // Replays the session from the problem statement, so the page can be checked against the brief
+  // at a glance. The requests are exactly the ones the buttons above send.
+  $('sample-btn').addEventListener('click', async () => {
+    await run('C 20 4', 'POST', '/api/canvas', {width: 20, height: 4});
+    await run('L 1 2 6 2', 'POST', '/api/canvas/lines', {x1: 1, y1: 2, x2: 6, y2: 2});
+    await run('L 6 3 6 4', 'POST', '/api/canvas/lines', {x1: 6, y1: 3, x2: 6, y2: 4});
+    await run('R 14 1 18 3', 'POST', '/api/canvas/rectangles', {x1: 14, y1: 1, x2: 18, y2: 3});
+    await run('B 10 3 o', 'POST', '/api/canvas/fills', {x: 10, y: 3, colour: 'o'});
+  });
+
+  // Clicking into the shape boxes aims the next canvas click at them instead of at the fill.
+  ['x1', 'y1'].forEach((id) => $(id).addEventListener('focus', () => { clickTarget = 'from'; }));
+  ['x2', 'y2'].forEach((id) => $(id).addEventListener('focus', () => { clickTarget = 'to'; }));
+  ['fx', 'fy', 'colour'].forEach((id) =>
+      $(id).addEventListener('focus', () => { clickTarget = 'fill'; }));
+
+  // The canvas is shared, so a fresh page may well find one already drawn. A 404 here is the
+  // normal empty state, not a failure worth shouting about.
+  call('GET', '/api/canvas')
+      .then((canvas) => {
+        render(canvas);
+        say('Joined the canvas already on the server.');
+      })
+      .catch(() => {
+        render(null);
+        say('Ready. Create a canvas to start drawing.');
+      });
+</script>
+
+</body>
+</html>
